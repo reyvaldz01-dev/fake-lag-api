@@ -1,14 +1,6 @@
 {
-  "name": "fakelag-api",
+  "name": "simple-api",
   "version": "1.0.0",
-  "description": "Fake Lag API",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "mongoose": "^7.5.0"
-  }
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.2", "cors": "^2.8.5" }
 }
