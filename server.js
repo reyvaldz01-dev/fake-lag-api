@@ -8,7 +8,7 @@ app.use(express.json());
 
 // Data disimpan di memory (gak ribet)
 let db = {
-    adminSecret: "FakeLagObb53-2026",
+    adminSecret: "FakeLagObb53",
     keys: []
 };
 
