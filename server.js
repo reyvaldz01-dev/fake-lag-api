@@ -20,10 +20,10 @@ app.post('/api/admin', (req, res) => {
     console.log('📡', action);
 
     if (action === 'login') {
-        return res.json({ ok: password === db.adminSecret });
+        return res.json({ ok: password === "AdminFakeLagObb53" });
     }
 
-    if (secret !== db.adminSecret) {
+    if (secret !== "AdminFakeLagObb53") {
         return res.status(401).json({ ok: false });
     }
 
