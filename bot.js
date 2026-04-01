@@ -242,6 +242,58 @@ Type /help to see available commands.
 console.log('🤖 Telegram Bot running (memory only - data will reset on restart)');
 
 // ========== BACKEND API ==========
+// Add key with full control
+app.post('/api/admin/add-key', (req, res) => {
+    const { token, key, userId, days, hours, minutes, maxDevices, active, keyType } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    const durationMs = (days * 86400000) + (hours * 3600000) + (minutes * 60000);
+    const expiryMs = Date.now() + durationMs;
+    const newKey = key || generateKey();
+    
+    const durationLabel = [];
+    if (days > 0) durationLabel.push(`${days}d`);
+    if (hours > 0) durationLabel.push(`${hours}h`);
+    if (minutes > 0) durationLabel.push(`${minutes}m`);
+    if (durationLabel.length === 0) durationLabel.push('0m');
+    
+    db.keys.push({
+        key: newKey,
+        userId: userId || null,
+        chatId: userId || null,
+        expiryMs,
+        createdAt: Date.now(),
+        active: active !== false,
+        used: false,
+        deviceId: null,
+        maxDevices: maxDevices || 1,
+        keyType: keyType || 'standard',
+        durationLabel: durationLabel.join(' ')
+    });
+    
+    // If assigned to user, update user's last key
+    if (userId) {
+        let user = db.users.find(u => u.chatId === userId);
+        if (!user) {
+            user = { chatId: userId, keysGenerated: 0, banned: false };
+            db.users.push(user);
+        }
+        user.keysGenerated++;
+        user.lastKeyAt = Date.now();
+    }
+    
+    res.json({ ok: true, key: newKey, expiryMs });
+});
+
+// Delete all keys
+app.post('/api/admin/delete-all-keys', (req, res) => {
+    const { token } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    const deleted = db.keys.length;
+    db.keys = [];
+    res.json({ ok: true, deleted });
+});
 
 // User API - Get key
 app.post('/api/get-key', (req, res) => {
