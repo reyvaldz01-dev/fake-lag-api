@@ -1,6 +1,21 @@
 {
-  "name": "simple-api",
-  "version": "1.0.0",
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "^4.18.2", "cors": "^2.8.5" }
+  "name": "fakelag-system",
+  "version": "3.0.0",
+  "description": "Complete Key Generator System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "bot": "node bot.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "mongoose": "^7.5.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
 }
