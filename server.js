@@ -8,8 +8,9 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ========== CONFIGURATION ==========
-const ADMIN_PASSWORD = "AsDMINREYVALDZ;
+const ADMIN_PASSWORD = "ADMINN0";
 
+// Memory DB
 let db = {
     keys: [],
     users: [],
@@ -116,22 +117,10 @@ app.post('/api/admin/add-key', (req, res) => {
     const { token, key, userId, days = 0, hours = 0, minutes = 0, years = 0 } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
-    const durationMs = 
-        (years * 365 * 86400000) + 
-        (days * 86400000) + 
-        (hours * 3600000) + 
-        (minutes * 60000);
-
+    const durationMs = (years * 365 * 86400000) + (days * 86400000) + (hours * 3600000) + (minutes * 60000);
     const finalDuration = durationMs === 0 ? 3 * 3600000 : durationMs;
     const expiryMs = Date.now() + finalDuration;
     const newKey = key || generateKey();
-    
-    const durationParts = [];
-    if (years > 0) durationParts.push(`${years} year${years > 1 ? 's' : ''}`);
-    if (days > 0) durationParts.push(`${days} day${days > 1 ? 's' : ''}`);
-    if (hours > 0) durationParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
-    if (minutes > 0) durationParts.push(`${minutes} minute${minutes > 1 ? 's' : ''}`);
-    const durationLabel = durationParts.length ? durationParts.join(', ') : '3 hours';
     
     db.keys.push({
         key: newKey,
@@ -139,8 +128,7 @@ app.post('/api/admin/add-key', (req, res) => {
         expiryMs,
         createdAt: Date.now(),
         active: true,
-        hours: hours + (days * 24) + (years * 365 * 24),
-        durationLabel
+        hours: hours + (days * 24) + (years * 365 * 24)
     });
     
     if (userId) {
@@ -153,13 +141,12 @@ app.post('/api/admin/add-key', (req, res) => {
         user.lastKeyAt = Date.now();
     }
     
-    res.json({ ok: true, key: newKey, expiryMs, durationLabel });
+    res.json({ ok: true, key: newKey, expiryMs });
 });
 
 app.post('/api/admin/delete-all-keys', (req, res) => {
     const { token } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     db.keys = [];
     res.json({ ok: true });
 });
@@ -169,7 +156,6 @@ app.post('/api/admin/stats', (req, res) => {
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
     const activeKeys = db.keys.filter(k => k.active && k.expiryMs > Date.now()).length;
-    
     res.json({
         ok: true,
         totalKeys: db.keys.length,
@@ -182,7 +168,6 @@ app.post('/api/admin/stats', (req, res) => {
 app.post('/api/admin/keys', (req, res) => {
     const { token, page = 1, limit = 50 } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     const keys = [...db.keys].reverse().slice((page - 1) * limit, page * limit);
     res.json({ ok: true, keys });
 });
@@ -190,7 +175,6 @@ app.post('/api/admin/keys', (req, res) => {
 app.post('/api/admin/delete-key', (req, res) => {
     const { token, key } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     db.keys = db.keys.filter(k => k.key !== key);
     res.json({ ok: true });
 });
@@ -198,7 +182,6 @@ app.post('/api/admin/delete-key', (req, res) => {
 app.post('/api/admin/ban-user', (req, res) => {
     const { token, chatId } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     const user = db.users.find(u => u.chatId === chatId);
     if (user) user.banned = true;
     res.json({ ok: true });
@@ -207,7 +190,6 @@ app.post('/api/admin/ban-user', (req, res) => {
 app.post('/api/admin/unban-user', (req, res) => {
     const { token, chatId } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     const user = db.users.find(u => u.chatId === chatId);
     if (user) user.banned = false;
     res.json({ ok: true });
@@ -216,23 +198,14 @@ app.post('/api/admin/unban-user', (req, res) => {
 app.post('/api/admin/users', (req, res) => {
     const { token, page = 1, limit = 50 } = req.body;
     if (token !== db.adminToken) return res.status(401).json({ ok: false });
-    
     const users = [...db.users].reverse().slice((page - 1) * limit, page * limit);
     res.json({ ok: true, users });
 });
 
-// ========== ROOT ==========
+// ========== ROOT - Redirect to Telegram ==========
 app.get('/', (req, res) => {
-    const TELEGRAM_URL = 'https://t.me/ReyValdz'; 
-     // Redirect
+    const TELEGRAM_URL = process.env.TELEGRAM_URL || 'https://t.me/ReyValdz';
     res.redirect(TELEGRAM_URL);
-});
-
-// ========== START SERVER ==========
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`⚠️ MEMORY MODE: Data will be lost on restart!`);
 });
 
 module.exports = app;
