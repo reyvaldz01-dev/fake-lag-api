@@ -1,14 +1,13 @@
 {
-  "name": "fakelag-bot",
-  "version": "3.0.0",
-  "description": "Fake Ninja Bot - Memory Mode",
-  "main": "bot.js",
+  "name": "key-generate",
+  "version": "1.0.0",
+  "description": "Key Generate - Memory Mode",
+  "main": "server.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "node-telegram-bot-api": "^0.64.0"
+    "cors": "^2.8.5"
   }
 }

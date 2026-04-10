@@ -1,61 +1,20 @@
 const express = require('express');
-const cors = require('cors');
 const crypto = require('crypto');
-const mongoose = require('mongoose');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ========== MONGODB ==========
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/fakelag';
-mongoose.connect(MONGODB_URI);
+// ========== CONFIGURATION ==========
+const ADMIN_PASSWORD = "AsDMINREYVALDZ;
 
-// ========== SCHEMAS ==========
-const KeySchema = new mongoose.Schema({
-    key: { type: String, unique: true },
-    userId: { type: String, index: true },
-    chatId: { type: String },
-    expiryMs: Number,
-    createdAt: { type: Date, default: Date.now },
-    active: { type: Boolean, default: true },
-    used: { type: Boolean, default: false },
-    deviceId: { type: String, default: null }
-});
-
-const UserSchema = new mongoose.Schema({
-    chatId: { type: String, unique: true },
-    username: String,
-    firstName: String,
-    lastName: String,
-    keysGenerated: { type: Number, default: 0 },
-    lastKeyAt: Date,
-    cooldownUntil: Date,
-    banned: { type: Boolean, default: false }
-});
-
-const AdminSchema = new mongoose.Schema({
-    username: { type: String, unique: true },
-    password: String,
-    role: { type: String, default: 'admin' }
-});
-
-const Key = mongoose.model('Key', KeySchema);
-const User = mongoose.model('User', UserSchema);
-const Admin = mongoose.model('Admin', AdminSchema);
-
-// ========== INIT ADMIN ==========
-async function initAdmin() {
-    const adminExists = await Admin.findOne({ username: 'admin' });
-    if (!adminExists) {
-        await Admin.create({
-            username: 'admin',
-            password: crypto.createHash('sha256').update('FakeNinja2024').digest('hex')
-        });
-        console.log('✅ Admin created');
-    }
-}
-initAdmin();
+let db = {
+    keys: [],
+    users: [],
+    adminToken: null
+};
 
 // ========== HELPER FUNCTIONS ==========
 function generateKey() {
@@ -63,199 +22,217 @@ function generateKey() {
     for (let i = 0; i < 4; i++) {
         parts.push(crypto.randomBytes(2).toString('hex').toUpperCase());
     }
-    return `NINA-${parts[0]}-${parts[1]}-${parts[2]}`;
+    return `VIPKEY-${parts[0]}-${parts[1]}-${parts[2]}`;
 }
 
-function hashPassword(password) {
-    return crypto.createHash('sha256').update(password).digest('hex');
-}
-
-// ========== API ENDPOINTS ==========
-
-// User: Get key
-app.post('/api/get-key', async (req, res) => {
-    const { chatId, hours } = req.body;
-    
-    if (!chatId) {
-        return res.json({ ok: false, error: 'Missing chatId' });
-    }
-    
-    const user = await User.findOne({ chatId });
+function getUser(chatId) {
+    let user = db.users.find(u => u.chatId === chatId);
     if (!user) {
-        return res.json({ ok: false, error: 'user_not_found' });
+        user = { chatId, keysGenerated: 0, banned: false, cooldownUntil: null };
+        db.users.push(user);
     }
+    return user;
+}
+
+function saveUser(user) {
+    const index = db.users.findIndex(u => u.chatId === user.chatId);
+    if (index !== -1) db.users[index] = user;
+}
+
+function generateKeyForUser(chatId, hours = 3) {
+    const user = getUser(chatId);
     
     if (user.banned) {
-        return res.json({ ok: false, error: 'banned' });
+        return { ok: false, error: 'banned' };
     }
     
-    if (user.cooldownUntil && new Date() < user.cooldownUntil) {
-        const remaining = Math.ceil((user.cooldownUntil - new Date()) / 1000);
-        return res.json({ ok: false, error: 'cooldown', remaining });
+    if (user.cooldownUntil && Date.now() < user.cooldownUntil) {
+        const remaining = Math.ceil((user.cooldownUntil - Date.now()) / 1000);
+        return { ok: false, error: 'cooldown', remaining };
     }
     
-    const activeKey = await Key.findOne({ chatId, active: true, expiryMs: { $gt: Date.now() } });
+    const activeKey = db.keys.find(k => k.chatId === chatId && k.active && k.expiryMs > Date.now());
     if (activeKey) {
-        return res.json({ ok: false, error: 'active_key_exists', key: activeKey.key });
+        return { ok: false, error: 'active_key_exists', key: activeKey.key };
     }
     
-    const duration = (hours || 3) * 3600000;
-    const expiryMs = Date.now() + duration;
+    const expiryMs = Date.now() + (hours * 3600000);
     const newKey = generateKey();
     
-    await Key.create({
+    db.keys.push({
         key: newKey,
         chatId,
-        userId: chatId,
         expiryMs,
-        active: true
+        createdAt: Date.now(),
+        active: true,
+        hours
     });
     
-    await User.updateOne(
-        { chatId },
-        { 
-            $inc: { keysGenerated: 1 },
-            $set: { lastKeyAt: new Date() }
-        }
-    );
+    user.keysGenerated++;
+    user.lastKeyAt = Date.now();
+    user.cooldownUntil = null;
+    saveUser(user);
     
-    res.json({ ok: true, key: newKey, expiryMs });
+    return { ok: true, key: newKey, expiryMs };
+}
+
+// ========== USER API ==========
+app.post('/api/get-key', (req, res) => {
+    const { chatId, userId, hours } = req.body;
+    const result = generateKeyForUser(chatId || userId, hours || 3);
+    res.json(result);
 });
 
-// User: Verify key
-app.post('/api/verify-key', async (req, res) => {
+app.post('/api/verify-key', (req, res) => {
     const { key, deviceId } = req.body;
     
-    if (!key) {
-        return res.json({ ok: false, error: 'Missing key' });
-    }
+    if (!key) return res.json({ ok: false, error: 'Missing key' });
     
-    const keyData = await Key.findOne({ key });
+    const keyData = db.keys.find(k => k.key === key);
     
-    if (!keyData) {
-        return res.json({ ok: false, error: 'key_not_found' });
-    }
-    
-    if (!keyData.active) {
-        return res.json({ ok: false, error: 'key_inactive' });
-    }
-    
+    if (!keyData) return res.json({ ok: false, error: 'key_not_found' });
+    if (!keyData.active) return res.json({ ok: false, error: 'key_inactive' });
     if (Date.now() > keyData.expiryMs) {
-        await Key.updateOne({ key }, { active: false });
+        keyData.active = false;
         return res.json({ ok: false, error: 'key_expired' });
     }
     
-    if (keyData.used && keyData.deviceId && keyData.deviceId !== deviceId) {
-        return res.json({ ok: false, error: 'device_mismatch' });
-    }
-    
-    if (!keyData.used && deviceId) {
-        await Key.updateOne({ key }, { used: true, deviceId });
-    }
-    
-    res.json({ 
-        ok: true, 
-        expiryMs: keyData.expiryMs,
-        message: 'Key valid'
-    });
+    res.json({ ok: true, expiryMs: keyData.expiryMs, hours: keyData.hours });
 });
 
-// Admin: Login
-app.post('/api/admin/login', async (req, res) => {
+// ========== ADMIN API ==========
+app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
-    const hashed = hashPassword(password);
-    
-    const admin = await Admin.findOne({ username, password: hashed });
-    if (admin) {
+    if (username === 'admin' && password === ADMIN_PASSWORD) {
         const token = crypto.randomBytes(32).toString('hex');
+        db.adminToken = token;
         res.json({ ok: true, token });
     } else {
         res.json({ ok: false });
     }
 });
 
-// Admin: Stats
-app.post('/api/admin/stats', async (req, res) => {
-    const { token } = req.body;
-    if (token !== 'admin_token_here') { // In production, use JWT
-        return res.status(401).json({ ok: false });
+app.post('/api/admin/add-key', (req, res) => {
+    const { token, key, userId, days = 0, hours = 0, minutes = 0, years = 0 } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    const durationMs = 
+        (years * 365 * 86400000) + 
+        (days * 86400000) + 
+        (hours * 3600000) + 
+        (minutes * 60000);
+
+    const finalDuration = durationMs === 0 ? 3 * 3600000 : durationMs;
+    const expiryMs = Date.now() + finalDuration;
+    const newKey = key || generateKey();
+    
+    const durationParts = [];
+    if (years > 0) durationParts.push(`${years} year${years > 1 ? 's' : ''}`);
+    if (days > 0) durationParts.push(`${days} day${days > 1 ? 's' : ''}`);
+    if (hours > 0) durationParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+    if (minutes > 0) durationParts.push(`${minutes} minute${minutes > 1 ? 's' : ''}`);
+    const durationLabel = durationParts.length ? durationParts.join(', ') : '3 hours';
+    
+    db.keys.push({
+        key: newKey,
+        chatId: userId || null,
+        expiryMs,
+        createdAt: Date.now(),
+        active: true,
+        hours: hours + (days * 24) + (years * 365 * 24),
+        durationLabel
+    });
+    
+    if (userId) {
+        let user = db.users.find(u => u.chatId === userId);
+        if (!user) {
+            user = { chatId: userId, keysGenerated: 0, banned: false, cooldownUntil: null };
+            db.users.push(user);
+        }
+        user.keysGenerated++;
+        user.lastKeyAt = Date.now();
     }
     
-    const totalKeys = await Key.countDocuments();
-    const activeKeys = await Key.countDocuments({ active: true, expiryMs: { $gt: Date.now() } });
-    const totalUsers = await User.countDocuments();
-    const bannedUsers = await User.countDocuments({ banned: true });
+    res.json({ ok: true, key: newKey, expiryMs, durationLabel });
+});
+
+app.post('/api/admin/delete-all-keys', (req, res) => {
+    const { token } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    db.keys = [];
+    res.json({ ok: true });
+});
+
+app.post('/api/admin/stats', (req, res) => {
+    const { token } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    const activeKeys = db.keys.filter(k => k.active && k.expiryMs > Date.now()).length;
     
     res.json({
         ok: true,
-        totalKeys,
+        totalKeys: db.keys.length,
         activeKeys,
-        totalUsers,
-        bannedUsers
+        totalUsers: db.users.length,
+        bannedUsers: db.users.filter(u => u.banned).length
     });
 });
 
-// Admin: List keys
-app.post('/api/admin/keys', async (req, res) => {
+app.post('/api/admin/keys', (req, res) => {
     const { token, page = 1, limit = 50 } = req.body;
-    if (token !== 'admin_token_here') {
-        return res.status(401).json({ ok: false });
-    }
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
-    const keys = await Key.find()
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit);
-    
+    const keys = [...db.keys].reverse().slice((page - 1) * limit, page * limit);
     res.json({ ok: true, keys });
 });
 
-// Admin: Delete key
-app.post('/api/admin/delete-key', async (req, res) => {
+app.post('/api/admin/delete-key', (req, res) => {
     const { token, key } = req.body;
-    if (token !== 'admin_token_here') {
-        return res.status(401).json({ ok: false });
-    }
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
-    await Key.deleteOne({ key });
+    db.keys = db.keys.filter(k => k.key !== key);
     res.json({ ok: true });
 });
 
-// Admin: Ban user
-app.post('/api/admin/ban-user', async (req, res) => {
+app.post('/api/admin/ban-user', (req, res) => {
     const { token, chatId } = req.body;
-    if (token !== 'admin_token_here') {
-        return res.status(401).json({ ok: false });
-    }
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
-    await User.updateOne({ chatId }, { banned: true });
+    const user = db.users.find(u => u.chatId === chatId);
+    if (user) user.banned = true;
     res.json({ ok: true });
 });
 
-// Admin: Unban user
-app.post('/api/admin/unban-user', async (req, res) => {
+app.post('/api/admin/unban-user', (req, res) => {
     const { token, chatId } = req.body;
-    if (token !== 'admin_token_here') {
-        return res.status(401).json({ ok: false });
-    }
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
     
-    await User.updateOne({ chatId }, { banned: false });
+    const user = db.users.find(u => u.chatId === chatId);
+    if (user) user.banned = false;
     res.json({ ok: true });
 });
 
+app.post('/api/admin/users', (req, res) => {
+    const { token, page = 1, limit = 50 } = req.body;
+    if (token !== db.adminToken) return res.status(401).json({ ok: false });
+    
+    const users = [...db.users].reverse().slice((page - 1) * limit, page * limit);
+    res.json({ ok: true, users });
+});
+
+// ========== ROOT ==========
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'running',
-        endpoints: [
-            '/api/get-key',
-            '/api/verify-key',
-            '/api/admin/login',
-            '/api/admin/stats'
-        ]
-    });
+    const TELEGRAM_URL = 'https://t.me/ReyValdz'; 
+     // Redirect
+    res.redirect(TELEGRAM_URL);
 });
 
+// ========== START SERVER ==========
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`⚠️ MEMORY MODE: Data will be lost on restart!`);
+});
 
 module.exports = app;
