@@ -14,8 +14,8 @@ const TELEGRAM_URL = 'https://t.me/ReyValdz';
 
 // Supabase configuration
 const SUPABASE_URL = "https://iqweywcngktyvfiyebar.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_c5Di66y0PjulzX6fi7Cqlg_ydBoUqtw";
-const SUPABASE_SERVICE_ROLE_KEY = "sb_secret_qn6QIwRA4jVERtgKYjafUA_AeJegwFC";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxd2V5d2NuZ2t0eXZmaXllYmFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4ODQxMzQsImV4cCI6MjA5MTQ2MDEzNH0.hn36HsEcfzRlM9LE25ebcWPBXpJVzQEfpA7ElVzp05s";
+const SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxd2V5d2NuZ2t0eXZmaXllYmFyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTg4NDEzNCwiZXhwIjoyMDkxNDYwMTM0fQ.q5eVJ-TDw1X14Pv_RJ0msB0_rbAyO1aUY4Oh7eer9UM";
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     console.error('❌ Missing Supabase environment variables!');
