@@ -1,19 +1,15 @@
 {
-  "name": "key-server",
+  "name": "vip-key-generator",
   "version": "1.0.0",
-  "description": "Key generator with permanent database storage",
+  "description": "VIP Key Generator for Vercel with Supabase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "vercel-build": "npm install"
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "sqlite3": "^5.1.6",
-    "sqlite": "^5.1.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "@supabase/supabase-js": "^2.39.0"
   }
 }
