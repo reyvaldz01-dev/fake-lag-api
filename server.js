@@ -16,15 +16,17 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Rate limiting untuk mencegah abuse
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 30, // Ditingkatkan karena verify key bebas
-    message: { success: false, error: 'Too many requests, try again later' }
+    windowMs: 60 * 1000,
+    max: 100,
+    message: { success: false, error: 'Too many requests, please try again after 1 minute' },
+    skip: (req) => {
+        return req.path === '/api/health';
+    }
 });
 app.use('/api/', limiter);
 
-// ============ COOLDOWN SYSTEM (Hanya untuk SET RANK) ============
+// ============ COOLDOWN SYSTEM ============
 const cooldownMap = new Map();
 const COOLDOWN_DURATION = 5 * 60 * 1000; // 5 menit
 
@@ -132,7 +134,7 @@ function getClientIP(req) {
            'Unknown';
 }
 
-// ============ ENDPOINT: CEK COOLDOWN (HANYA UNTUK SET RANK) ============
+// ============ ENDPOINT: CEK COOLDOWN ============
 app.get('/api/cooldown-status', (req, res) => {
     const identifier = getCooldownIdentifier(req);
     const cooldown = checkCooldown(identifier);
@@ -180,7 +182,7 @@ app.post('/api/set-rank', async (req, res) => {
     const userAgent = req.headers['user-agent'] || 'Unknown';
     const identifier = getCooldownIdentifier(req);
     
-    // CEK COOLDOWN (HANYA UNTUK SET RANK)
+    // CEK COOLDOWN
     const cooldown = checkCooldown(identifier);
     if (cooldown.active) {
         const errorMsg = `Cooldown active! Please wait ${formatRemainingTime(cooldown.remaining)}`;
@@ -209,7 +211,6 @@ app.post('/api/set-rank', async (req, res) => {
     }
     
     let loginSuccess = false;
-    let rankSuccess = false;
     
     try {
         // Login ke Firebase
@@ -259,13 +260,11 @@ app.post('/api/set-rank', async (req, res) => {
             timeout: rankTimeout
         });
         
-        if (rankResponse.status === 200) {
-            rankSuccess = true;
-        } else {
+        if (rankResponse.status !== 200) {
             throw new Error(`Rank API responded with status ${rankResponse.status}`);
         }
         
-        // AKTIFKAN COOLDOWN (HANYA SETELAH SUKSES)
+        // AKTIFKAN COOLDOWN
         setCooldown(identifier, nexusKey, email);
         
         // Kirim notifikasi ke Telegram
@@ -274,12 +273,7 @@ app.post('/api/set-rank', async (req, res) => {
         res.json({
             success: true,
             message: '🎉 KING RANK successfully set!',
-            server: config.name,
-            cooldown: {
-                active: true,
-                duration: COOLDOWN_DURATION,
-                durationFormatted: formatRemainingTime(COOLDOWN_DURATION)
-            }
+            server: config.name
         });
         
     } catch (error) {
@@ -320,10 +314,9 @@ app.listen(PORT, () => {
     ╔═══════════════════════════════════════════╗
     ║   🔒 NEXUS CPM BACKEND SECURE              ║
     ║   Running on port ${PORT}                       ║
-    ║   Telegram Reporter: ACTIVE                ║
-    ║   Rate Limiter: ON (30 req/15min)          ║
-    ║   Cooldown System: ONLY FOR SET RANK       ║
-    ║   Verify Key: FREE (NO COOLDOWN)           ║
+    ║   Rate Limit: 100 request/menit           ║
+    ║   Cooldown: ONLY for SET RANK (5 menit)   ║
+    ║   Verify Key: FREE (NO COOLDOWN)          ║
     ╚═══════════════════════════════════════════╝
     `);
 });
